@@ -8,6 +8,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import MapKit
 
 // MARK: - Threat Level
 enum ThreatLevel: String, Codable, CaseIterable {
@@ -210,15 +211,155 @@ class ConflictDataManager: ObservableObject {
     @Published var selectedConflict: MajorConflict?
     @Published var searchText: String = ""
     @Published var selectedFilter: ThreatLevel?
+    @Published var newsItems: [NewsItem] = []
+    @Published var newsStatus: NewsStatus = .idle
+    @Published var lastNewsUpdate: Date?
+    @Published var liveHotspots: [LiveMapPoint] = []
+    @Published var liveConflicts: [LiveMapPoint] = []
+    @Published var liveBases: [LiveMapPoint] = []
+    @Published var pizzIntStatus: PizzIntStatus?
+    @Published var pizzIntTensions: [GdeltTensionPair] = []
+    @Published var pizzIntState: PizzIntLoadState = .idle
+
+    private var newsTimer: Timer?
+    private var pizzIntTimer: Timer?
+    private var mapFetchWorkItem: DispatchWorkItem?
+    private var lastMapFetch: Date?
+    private var lastBasesKey: String?
+    private var lastBasesFetch: Date?
 
     init() {
         loadSampleData()
+        refreshNews()
+        scheduleNewsRefresh()
+        refreshPizzInt()
+        schedulePizzIntRefresh()
+    }
+
+    deinit {
+        newsTimer?.invalidate()
+        pizzIntTimer?.invalidate()
     }
 
     func loadSampleData() {
         // Load events from JSON if available, otherwise use sample data
         conflicts = Self.sampleConflicts
         events = Self.sampleEvents
+    }
+
+    func refreshNews() {
+        newsStatus = .loading
+
+        Task {
+            let result = await NewsFeedService.fetchAll()
+            await MainActor.run {
+                if result.items.isEmpty {
+                    newsStatus = .failed("No live feeds available")
+                } else {
+                    newsStatus = .idle
+                }
+                newsItems = result.items
+                lastNewsUpdate = Date()
+            }
+        }
+    }
+
+    private func scheduleNewsRefresh() {
+        newsTimer?.invalidate()
+        newsTimer = Timer.scheduledTimer(withTimeInterval: 5 * 60, repeats: true) { [weak self] _ in
+            self?.refreshNews()
+        }
+    }
+
+    func refreshPizzInt() {
+        pizzIntState = .loading
+
+        Task {
+            async let status = PizzIntService.fetchStatus()
+            async let tensions = PizzIntService.fetchTensions()
+
+            do {
+                let (statusValue, tensionValues) = try await (status, tensions)
+                await MainActor.run {
+                    pizzIntStatus = statusValue
+                    pizzIntTensions = tensionValues
+                    pizzIntState = .idle
+                }
+            } catch {
+                await MainActor.run {
+                    pizzIntState = .failed("PizzINT unavailable")
+                }
+            }
+        }
+    }
+
+    private func schedulePizzIntRefresh() {
+        pizzIntTimer?.invalidate()
+        pizzIntTimer = Timer.scheduledTimer(withTimeInterval: 10 * 60, repeats: true) { [weak self] _ in
+            self?.refreshPizzInt()
+        }
+    }
+
+    func updateMapRegion(_ region: MKCoordinateRegion) {
+        mapFetchWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.fetchLiveMapData(region: region)
+        }
+        mapFetchWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: workItem)
+    }
+
+    private func fetchLiveMapData(region: MKCoordinateRegion) {
+        let now = Date()
+        if let last = lastMapFetch, now.timeIntervalSince(last) < 60 {
+            return
+        }
+        lastMapFetch = now
+
+        Task {
+            async let hotspotsResult = LiveMapService.fetchHotspots()
+            async let conflictsResult = LiveMapService.fetchConflictZones()
+
+            var baseItems: [LiveMapPoint] = liveBases
+            if shouldFetchBases(for: region) {
+                let key = regionKey(region)
+                let isStale = lastBasesFetch.map { now.timeIntervalSince($0) > 10 * 60 } ?? true
+                if key != lastBasesKey || isStale {
+                    do {
+                        baseItems = try await LiveMapService.fetchMilitaryBases(region: region)
+                        lastBasesKey = key
+                        lastBasesFetch = now
+                    } catch {
+                        // Keep previous base data on failure
+                    }
+                }
+            }
+
+            do {
+                let hotspotItems = try await hotspotsResult
+                let conflictItems = try await conflictsResult
+                await MainActor.run {
+                    liveHotspots = Array(hotspotItems.prefix(120))
+                    liveConflicts = Array(conflictItems.prefix(120))
+                    liveBases = Array(baseItems.prefix(150))
+                }
+            } catch {
+                // Keep previous data if fetch fails
+            }
+        }
+    }
+
+    private func shouldFetchBases(for region: MKCoordinateRegion) -> Bool {
+        // Overpass timeouts are common when zoomed far out. Only fetch when reasonably zoomed in.
+        return region.span.latitudeDelta < 70 && region.span.longitudeDelta < 120
+    }
+
+    private func regionKey(_ region: MKCoordinateRegion) -> String {
+        let lat = (region.center.latitude * 10).rounded() / 10
+        let lon = (region.center.longitude * 10).rounded() / 10
+        let latSpan = (region.span.latitudeDelta * 10).rounded() / 10
+        let lonSpan = (region.span.longitudeDelta * 10).rounded() / 10
+        return "\(lat),\(lon),\(latSpan),\(lonSpan)"
     }
 
     var filteredConflicts: [MajorConflict] {

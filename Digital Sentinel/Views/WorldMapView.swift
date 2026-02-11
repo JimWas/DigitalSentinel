@@ -12,77 +12,141 @@ import MapKit
 struct WorldMapView: View {
     @ObservedObject var dataManager: ConflictDataManager
     @Binding var selectedConflict: MajorConflict?
+    var bottomInset: CGFloat = 0
     @State private var mapRegion = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 20, longitude: 20),
         span: MKCoordinateSpan(latitudeDelta: 120, longitudeDelta: 180)
     )
     @State private var showDetailCard = false
+    @State private var selectedLivePoint: LiveMapPoint?
 
     var body: some View {
         ZStack {
-            // Map with dark styling
-            Map(coordinateRegion: $mapRegion, annotationItems: dataManager.conflicts) { conflict in
-                MapAnnotation(coordinate: CLLocationCoordinate2D(
-                    latitude: conflict.coordinate.latitude,
-                    longitude: conflict.coordinate.longitude
-                )) {
-                    ConflictMarker(conflict: conflict, isSelected: selectedConflict?.id == conflict.id)
+            ZStack {
+                // Map with dark styling
+                Map(coordinateRegion: $mapRegion, annotationItems: dataManager.conflicts) { conflict in
+                    MapAnnotation(coordinate: CLLocationCoordinate2D(
+                        latitude: conflict.coordinate.latitude,
+                        longitude: conflict.coordinate.longitude
+                    )) {
+                        ConflictMarker(conflict: conflict, isSelected: selectedConflict?.id == conflict.id)
+                            .onTapGesture {
+                                withAnimation(.easeInOut(duration: 0.3)) {
+                                    if selectedConflict?.id == conflict.id {
+                                        selectedConflict = nil
+                                    } else {
+                                        selectedConflict = conflict
+                                        showDetailCard = true
+                                    }
+                                }
+                            }
+                    }
+                }
+                .mapStyle(.imagery)
+                .colorScheme(.dark)
+            .onAppear { scheduleMapRefresh() }
+            .onChange(of: mapRegion.center.latitude) { _, _ in scheduleMapRefresh() }
+            .onChange(of: mapRegion.center.longitude) { _, _ in scheduleMapRefresh() }
+            .onChange(of: mapRegion.span.latitudeDelta) { _, _ in scheduleMapRefresh() }
+            .onChange(of: mapRegion.span.longitudeDelta) { _, _ in scheduleMapRefresh() }
+
+                // Dark overlay for matrix effect
+                MatrixColors.darkBackground.opacity(0.6)
+                    .allowsHitTesting(false)
+
+                // Grid overlay
+                GridOverlay(spacing: 80, lineWidth: 0.3, color: MatrixColors.matrixGreen.opacity(0.08))
+
+                // Custom markers overlay (for more control)
+                GeometryReader { geometry in
+                    ForEach(dataManager.conflicts) { conflict in
+                        ConflictMarkerOverlay(
+                            conflict: conflict,
+                            isSelected: selectedConflict?.id == conflict.id,
+                            mapSize: geometry.size,
+                            mapRegion: mapRegion
+                        )
                         .onTapGesture {
                             withAnimation(.easeInOut(duration: 0.3)) {
                                 if selectedConflict?.id == conflict.id {
                                     selectedConflict = nil
                                 } else {
                                     selectedConflict = conflict
-                                    showDetailCard = true
                                 }
                             }
                         }
-                }
-            }
-            .mapStyle(.imagery)
-            .colorScheme(.dark)
+                    }
 
-            // Dark overlay for matrix effect
-            MatrixColors.darkBackground.opacity(0.6)
-                .allowsHitTesting(false)
-
-            // Grid overlay
-            GridOverlay(spacing: 80, lineWidth: 0.3, color: MatrixColors.matrixGreen.opacity(0.08))
-
-            // Custom markers overlay (for more control)
-            GeometryReader { geometry in
-                ForEach(dataManager.conflicts) { conflict in
-                    ConflictMarkerOverlay(
-                        conflict: conflict,
-                        isSelected: selectedConflict?.id == conflict.id,
-                        mapSize: geometry.size,
-                        mapRegion: mapRegion
-                    )
-                    .onTapGesture {
-                        withAnimation(.easeInOut(duration: 0.3)) {
-                            if selectedConflict?.id == conflict.id {
-                                selectedConflict = nil
-                            } else {
-                                selectedConflict = conflict
+                    ForEach(dataManager.liveHotspots) { point in
+                        LivePointOverlay(
+                            point: point,
+                            mapSize: geometry.size,
+                            mapRegion: mapRegion
+                        )
+                        .onTapGesture {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                if selectedLivePoint?.id == point.id {
+                                    selectedLivePoint = nil
+                                } else {
+                                    selectedLivePoint = point
+                                    selectedConflict = nil
+                                }
                             }
                         }
                     }
+
+                    ForEach(dataManager.liveConflicts) { point in
+                        LivePointOverlay(
+                            point: point,
+                            mapSize: geometry.size,
+                            mapRegion: mapRegion
+                        )
+                        .onTapGesture {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                if selectedLivePoint?.id == point.id {
+                                    selectedLivePoint = nil
+                                } else {
+                                    selectedLivePoint = point
+                                    selectedConflict = nil
+                                }
+                            }
+                        }
+                    }
+
+                    ForEach(dataManager.liveBases) { point in
+                        LivePointOverlay(
+                            point: point,
+                            mapSize: geometry.size,
+                            mapRegion: mapRegion
+                        )
+                        .onTapGesture {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                if selectedLivePoint?.id == point.id {
+                                    selectedLivePoint = nil
+                                } else {
+                                    selectedLivePoint = point
+                                    selectedConflict = nil
+                                }
+                            }
+                        }
+                    }
+
+                    // Connection lines between related conflicts
+                    ConnectionLinesView(conflicts: dataManager.conflicts, mapSize: geometry.size, mapRegion: mapRegion)
                 }
 
-                // Connection lines between related conflicts
-                ConnectionLinesView(conflicts: dataManager.conflicts, mapSize: geometry.size, mapRegion: mapRegion)
-            }
-
-            // Live monitoring indicator
-            VStack {
-                HStack {
+                // Live monitoring indicator
+                VStack {
+                    HStack {
+                        Spacer()
+                        LiveMonitoringIndicator(activeZones: dataManager.statistics.activeZones)
+                            .padding(.trailing, 16)
+                            .padding(.top, 8)
+                    }
                     Spacer()
-                    LiveMonitoringIndicator(activeZones: dataManager.statistics.activeZones)
-                        .padding(.trailing, 16)
-                        .padding(.top, 8)
                 }
-                Spacer()
             }
+            .clipped()
 
             // Detail card when conflict selected
             if let conflict = selectedConflict {
@@ -92,10 +156,157 @@ struct WorldMapView: View {
                         withAnimation { selectedConflict = nil }
                     }
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 16)
+                    .padding(.bottom, bottomInset + 16)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
+
+            if let point = selectedLivePoint {
+                VStack {
+                    Spacer()
+                    LivePointDetailCard(point: point) {
+                        withAnimation { selectedLivePoint = nil }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, bottomInset + 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+        }
+    }
+}
+
+private extension WorldMapView {
+    func scheduleMapRefresh() {
+        DispatchQueue.main.async {
+            dataManager.updateMapRegion(mapRegion)
+        }
+    }
+}
+
+// MARK: - Live Map Point Overlay
+struct LivePointOverlay: View {
+    let point: LiveMapPoint
+    let mapSize: CGSize
+    let mapRegion: MKCoordinateRegion
+
+    private var position: CGPoint {
+        let lat = point.coordinate.latitude
+        let lon = point.coordinate.longitude
+
+        let centerLat = mapRegion.center.latitude
+        let centerLon = mapRegion.center.longitude
+        let spanLat = mapRegion.span.latitudeDelta
+        let spanLon = mapRegion.span.longitudeDelta
+
+        let x = ((lon - centerLon + spanLon / 2) / spanLon) * mapSize.width
+        let y = ((centerLat - lat + spanLat / 2) / spanLat) * mapSize.height
+
+        return CGPoint(x: x, y: y)
+    }
+
+    private var color: Color {
+        switch point.kind {
+        case .hotspot:
+            return MatrixColors.matrixGreen
+        case .conflict:
+            return MatrixColors.critical
+        case .base:
+            return MatrixColors.matrixCyan
+        }
+    }
+
+    private var size: CGFloat {
+        switch point.kind {
+        case .hotspot:
+            return 8
+        case .conflict:
+            return 10
+        case .base:
+            return 6
+        }
+    }
+
+    var body: some View {
+        Circle()
+            .fill(color.opacity(0.9))
+            .frame(width: size, height: size)
+            .shadow(color: color.opacity(0.6), radius: 6)
+            .position(position)
+            .contentShape(Circle())
+    }
+}
+
+// MARK: - Live Point Detail Card
+struct LivePointDetailCard: View {
+    let point: LiveMapPoint
+    let onClose: () -> Void
+
+    private var kindLabel: String {
+        switch point.kind {
+        case .hotspot: return "STRATEGIC"
+        case .conflict: return "CONFLICT"
+        case .base: return "BASE"
+        }
+    }
+
+    private var color: Color {
+        switch point.kind {
+        case .hotspot: return MatrixColors.matrixGreen
+        case .conflict: return MatrixColors.critical
+        case .base: return MatrixColors.matrixCyan
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(point.name.uppercased())
+                    .font(.nasalization(size: 14))
+                    .foregroundColor(color)
+
+                Spacer()
+
+                Text(kindLabel)
+                    .font(.nasalization(size: 9))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(color)
+                    .cornerRadius(4)
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .foregroundColor(MatrixColors.textSecondary)
+                }
+            }
+
+            Text(detailSubtext)
+                .font(.nasalization(size: 10))
+                .foregroundColor(MatrixColors.textSecondary)
+
+            Text("COORDINATES")
+                .font(.nasalization(size: 8))
+                .foregroundColor(MatrixColors.textDim)
+
+            Text(String(format: "%.2f°, %.2f°", point.coordinate.latitude, point.coordinate.longitude))
+                .font(.nasalization(size: 12))
+                .foregroundColor(MatrixColors.matrixGreen)
+        }
+        .padding(16)
+        .background(MatrixColors.overlayBackground)
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(color.opacity(0.6), lineWidth: 1)
+        )
+    }
+
+    private var detailSubtext: String {
+        switch point.kind {
+        case .hotspot: return "Strategic chokepoint activity"
+        case .conflict: return "Active conflict signal"
+        case .base: return "Military facility"
         }
     }
 }
@@ -296,20 +507,20 @@ struct ConflictDetailCard: View {
             // Header
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(conflict.name)
+                    Text(conflict.name.uppercased())
                         .font(.nasalization(size: 16))
-                        .foregroundColor(MatrixColors.textPrimary)
-
-                    HStack(spacing: 8) {
-                        ThreatBadge(level: conflict.threatLevel)
-                        Text(conflict.type.rawValue)
-                            .font(.nasalization(size: 9))
-                            .foregroundColor(MatrixColors.textSecondary)
-                        StatusIndicator(status: conflict.status)
-                    }
+                        .foregroundColor(conflict.threatLevel.color)
                 }
 
                 Spacer()
+
+                Text(conflict.threatLevel.rawValue.uppercased())
+                    .font(.nasalization(size: 9))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(conflict.threatLevel.color)
+                    .cornerRadius(4)
 
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -325,7 +536,7 @@ struct ConflictDetailCard: View {
             Text(conflict.description)
                 .font(.nasalization(size: 10))
                 .foregroundColor(MatrixColors.textSecondary)
-                .lineLimit(2)
+                .lineLimit(3)
 
             // Stats row
             HStack(spacing: 20) {
@@ -337,27 +548,24 @@ struct ConflictDetailCard: View {
                 .background(MatrixColors.borderGreen.opacity(0.3))
 
             // Footer
+            Text("COORDINATES")
+                .font(.nasalization(size: 8))
+                .foregroundColor(MatrixColors.textDim)
+
+            Text(String(format: "%.2f°, %.2f°", conflict.coordinate.latitude, conflict.coordinate.longitude))
+                .font(.nasalization(size: 12))
+                .foregroundColor(MatrixColors.matrixGreen)
+
             HStack {
-                Image(systemName: "mappin.circle.fill")
-                    .foregroundColor(MatrixColors.matrixCyan)
-                    .font(.system(size: 10))
                 Text(conflict.region)
                     .font(.nasalization(size: 9))
                     .foregroundColor(MatrixColors.textSecondary)
 
                 Spacer()
 
-                Image(systemName: "calendar")
-                    .foregroundColor(MatrixColors.textDim)
-                    .font(.system(size: 10))
                 Text("Since \(conflict.startDate)")
                     .font(.nasalization(size: 9))
                     .foregroundColor(MatrixColors.textDim)
-
-                Text(conflict.parties.first ?? "")
-                    .font(.nasalization(size: 8))
-                    .foregroundColor(MatrixColors.critical.opacity(0.8))
-                    .lineLimit(1)
             }
         }
         .padding(16)

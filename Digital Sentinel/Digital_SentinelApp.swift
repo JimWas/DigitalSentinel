@@ -24,6 +24,7 @@ struct Digital_SentinelApp: App {
             }
             .preferredColorScheme(.dark)
             .onAppear {
+                AdMobManager.shared.configure(testAdsEnabled: true)
                 // Show splash for 3.5 seconds
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                     withAnimation(.easeInOut(duration: 0.5)) {
